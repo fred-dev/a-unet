@@ -623,3 +623,26 @@ def TextConditioningPlugin(
         return Module([embedder, net], forward)  # type: ignore
 
     return Net
+
+def MultipleContinuousVariableConditioningPlugin(
+    net_t: Type[nn.Module], num_conditioning_values=6, weight_fn=None, influence_fn=None
+) -> Callable[..., nn.Module]:
+    """Adds continuous variable conditioning"""
+
+    def Net(embedding_features: int = num_conditioning_values, **kwargs) -> nn.Module:
+        msg = f"MultipleContinuousVariableConditioningPlugin requires embedding_features={num_conditioning_values}"
+        assert embedding_features == num_conditioning_values, msg
+
+        net = net_t(embedding_features=embedding_features, **kwargs)  # type: ignore
+
+        def forward(
+            x: Tensor, conditioning_values: Sequence[float], embedding: Optional[Tensor] = None, **kwargs
+        ):
+            conditioning_embedding = torch.tensor(conditioning_values).unsqueeze(dim=0)  # type: ignore
+            if exists(embedding):
+                conditioning_embedding = torch.cat([conditioning_embedding, embedding], dim=1)
+            return net(x, embedding=conditioning_embedding, **kwargs)
+
+        return Module([net], forward)  # type: ignore
+
+    return Net
