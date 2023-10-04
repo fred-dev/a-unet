@@ -440,12 +440,12 @@ Embedders
 
 
 class NumberEmbedder(nn.Module):
-    def __init__(self, features: int, dim: int = 256):
+    def __init__(self, embedding_features: int, dim: int = 256):
         super().__init__()
         assert dim % 2 == 0, f"dim must be divisible by 2, found {dim}"
-        self.features = features
+        self.embedding_features = embedding_features
         self.weights = nn.Parameter(torch.randn(dim // 2))
-        self.to_out = nn.Linear(in_features=dim + 1, out_features=features)
+        self.to_out = nn.Linear(in_features=dim + 1, out_features=embedding_features)
 
     def to_embedding(self, x: Tensor) -> Tensor:
         x = rearrange(x, "b -> b 1")
@@ -460,7 +460,7 @@ class NumberEmbedder(nn.Module):
         assert isinstance(x, Tensor)
         shape = x.shape
         x = rearrange(x, "... -> (...)")
-        return self.to_embedding(x).view(*shape, self.features)  # type: ignore
+        return self.to_embedding(x).view(*shape, self.embedding_features)  # type: ignore
 
 
 class T5Embedder(nn.Module):
@@ -494,6 +494,7 @@ class T5Embedder(nn.Module):
         )["last_hidden_state"]
 
         return embedding
+
 
 
 """
@@ -566,7 +567,7 @@ def TimeConditioningPlugin(
         msg = "TimeConditioningPlugin requires modulation_features"
         assert exists(modulation_features), msg
 
-        embedder = NumberEmbedder(features=modulation_features)
+        embedder = NumberEmbedder(embedding_features=modulation_features)
         mlp = Repeat(
             nn.Sequential(
                 nn.Linear(modulation_features, modulation_features), nn.GELU()
@@ -606,7 +607,7 @@ def TextConditioningPlugin(
     msg = "TextConditioningPlugin embedder requires embedding_features attribute"
     assert hasattr(embedder, "embedding_features"), msg
     features: int = embedder.embedding_features  # type: ignore
-
+    print(f"TextConditioningPlugin: embedding_features={features}")
     def Net(embedding_features: int = features, **kwargs) -> nn.Module:
         msg = f"TextConditioningPlugin requires embedding_features={features}"
         assert embedding_features == features, msg
@@ -624,25 +625,69 @@ def TextConditioningPlugin(
 
     return Net
 
-def MultipleContinuousVariableConditioningPlugin(
-    net_t: Type[nn.Module], num_conditioning_values=6, weight_fn=None, influence_fn=None
+def MultiCCVariableConditioningPlugin(
+    net_t: Type[nn.Module],
 ) -> Callable[..., nn.Module]:
-    """Adds continuous variable conditioning"""
-
-    def Net(embedding_features: int = num_conditioning_values, **kwargs) -> nn.Module:
-        msg = f"MultipleContinuousVariableConditioningPlugin requires embedding_features={num_conditioning_values}"
-        assert embedding_features == num_conditioning_values, msg
-
+    """Adds text conditioning without an embedder"""
+    embedder = T5Embedder()
+    def Net(embedding_features: int, **kwargs) -> nn.Module:
         net = net_t(embedding_features=embedding_features, **kwargs)  # type: ignore
 
         def forward(
-            x: Tensor, conditioning_values: Sequence[float], embedding: Optional[Tensor] = None, **kwargs
+            x: Tensor,
+            cc_embedding: Optional[Tensor] = None,
+            **kwargs,   
         ):
-            conditioning_embedding = torch.tensor(conditioning_values).unsqueeze(dim=0)  # type: ignore
-            if exists(embedding):
-                conditioning_embedding = torch.cat([conditioning_embedding, embedding], dim=1)
-            return net(x, embedding=conditioning_embedding, **kwargs)
+            if exists(cc_embedding):  
+                return net(x, embedding=cc_embedding, **kwargs)
+            else:
+                return net(x, **kwargs)
 
-        return Module([net], forward)  # type: ignore
+        return Module([embedder,net], forward)
+
+    return Net
+
+def ClassifierFreeGuidancePluginCCVariables(
+    net_t: Type[nn.Module],
+    num_conditioning_values: int,
+) -> Callable[..., nn.Module]:
+    """Classifier-Free Guidance with Variable Conditioning Values and Scaling Factors"""
+
+    def Net(embedding_features: int, **kwargs) -> nn.Module:
+        fixed_embedding = FixedEmbedding(
+            max_length=num_conditioning_values,
+            features=embedding_features,
+        )
+        net = net_t(embedding_features=embedding_features, **kwargs)  # type: ignore
+
+        def forward(
+            x: Tensor,
+            embedding: Optional[Tensor] = None,
+            embedding_scale: float = 1.0,
+            embedding_mask_proba: float = 0.0,
+            **kwargs,
+        ):
+            msg = "ClassiferFreeGuidancePlugin requires embedding"
+            assert exists(embedding), msg
+            b, device = embedding.shape[0], embedding.device
+            embedding_mask = fixed_embedding(embedding)
+
+            if embedding_mask_proba > 0.0:
+                # Randomly mask embedding
+                batch_mask = rand_bool(
+                    shape=(b, 1, 1), proba=embedding_mask_proba, device=device
+                )
+                embedding = torch.where(batch_mask, embedding_mask, embedding)
+
+            if embedding_scale != 1.0:
+                # Compute both normal and fixed embedding outputs
+                out = net(x, embedding=embedding, **kwargs)
+                out_masked = net(x, embedding=embedding_mask, **kwargs)
+                # Scale conditional output using classifier-free guidance
+                return out_masked + (out - out_masked) * embedding_scale
+            else:
+                return net(x, embedding=embedding, **kwargs)
+
+        return Module([fixed_embedding, net], forward)
 
     return Net
