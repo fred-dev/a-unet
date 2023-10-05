@@ -629,7 +629,6 @@ def MultiCCVariableConditioningPlugin(
     net_t: Type[nn.Module],
 ) -> Callable[..., nn.Module]:
     """Adds text conditioning without an embedder"""
-    embedder = T5Embedder()
     def Net(embedding_features: int, **kwargs) -> nn.Module:
         net = net_t(embedding_features=embedding_features, **kwargs)  # type: ignore
 
@@ -643,7 +642,7 @@ def MultiCCVariableConditioningPlugin(
             else:
                 return net(x, **kwargs)
 
-        return Module([embedder,net], forward)
+        return Module([net], forward)
 
     return Net
 
