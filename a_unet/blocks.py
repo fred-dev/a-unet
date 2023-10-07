@@ -1,11 +1,12 @@
 from math import pi
-from typing import Any, Callable, Optional, Sequence, Type, TypeVar, Union
+from typing import Any, Callable, Optional, Sequence, Type, TypeVar, Union, List
 
 import torch
 import torch.nn.functional as F
 from einops import pack, rearrange, reduce, repeat, unpack
 from torch import Tensor, einsum, nn
 from typing_extensions import TypeGuard
+
 
 V = TypeVar("V")
 
@@ -627,11 +628,16 @@ def TextConditioningPlugin(
 
 def MultiCCVariableConditioningPlugin(
     net_t: Type[nn.Module],
+    embedding_features: int,
+    cat_dims: List[int],
+    cat_idxs: List[int],
+    cat_emb_dims: List[int],
+    group_matrix: torch.Tensor,
 ) -> Callable[..., nn.Module]:
     """Adds text conditioning without an embedder"""
-    embedder = embedder if exists(embedder) else T5Embedder()
+    embedder = embedder if exists(embedder) else EmbeddingGenerator(embedding_features, cat_dims, cat_idxs, cat_emb_dims, group_matrix)
 
-    def Net(embedding_features: int, **kwargs) -> nn.Module:
+    def Net( **kwargs) -> nn.Module:
         net = net_t(embedding_features=embedding_features, **kwargs)  # type: ignore
 
         def forward(
@@ -639,8 +645,8 @@ def MultiCCVariableConditioningPlugin(
             cc_embedding: Optional[Tensor] = None,
             **kwargs,   
         ):
-            if exists(cc_embedding):  
-                return net(x, embedding=cc_embedding, **kwargs)
+            if exists(cc_embedding):
+                return net(x, embedding=embedder(cc_embedding), **kwargs)
             else:
                 return net(x, **kwargs)
 
