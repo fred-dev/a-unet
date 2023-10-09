@@ -1,12 +1,11 @@
 from math import pi
-from typing import Any, Callable, Optional, Sequence, Type, TypeVar, Union, List
-import numpy as np
+from typing import Any, Callable, Optional, Sequence, Type, TypeVar, Union
+
 import torch
 import torch.nn.functional as F
 from einops import pack, rearrange, reduce, repeat, unpack
 from torch import Tensor, einsum, nn
 from typing_extensions import TypeGuard
-
 
 V = TypeVar("V")
 
@@ -441,12 +440,12 @@ Embedders
 
 
 class NumberEmbedder(nn.Module):
-    def __init__(self, embedding_features: int, dim: int = 256):
+    def __init__(self, features: int, dim: int = 256):
         super().__init__()
         assert dim % 2 == 0, f"dim must be divisible by 2, found {dim}"
-        self.embedding_features = embedding_features
+        self.features = features
         self.weights = nn.Parameter(torch.randn(dim // 2))
-        self.to_out = nn.Linear(in_features=dim + 1, out_features=embedding_features)
+        self.to_out = nn.Linear(in_features=dim + 1, out_features=features)
 
     def to_embedding(self, x: Tensor) -> Tensor:
         x = rearrange(x, "b -> b 1")
@@ -461,7 +460,7 @@ class NumberEmbedder(nn.Module):
         assert isinstance(x, Tensor)
         shape = x.shape
         x = rearrange(x, "... -> (...)")
-        return self.to_embedding(x).view(*shape, self.embedding_features)  # type: ignore
+        return self.to_embedding(x).view(*shape, self.features)  # type: ignore
 
 
 class T5Embedder(nn.Module):
@@ -495,7 +494,6 @@ class T5Embedder(nn.Module):
         )["last_hidden_state"]
 
         return embedding
-
 
 
 """
@@ -568,7 +566,7 @@ def TimeConditioningPlugin(
         msg = "TimeConditioningPlugin requires modulation_features"
         assert exists(modulation_features), msg
 
-        embedder = NumberEmbedder(embedding_features=modulation_features)
+        embedder = NumberEmbedder(features=modulation_features)
         mlp = Repeat(
             nn.Sequential(
                 nn.Linear(modulation_features, modulation_features), nn.GELU()
@@ -608,7 +606,7 @@ def TextConditioningPlugin(
     msg = "TextConditioningPlugin embedder requires embedding_features attribute"
     assert hasattr(embedder, "embedding_features"), msg
     features: int = embedder.embedding_features  # type: ignore
-    print(f"TextConditioningPlugin: embedding_features={features}")
+
     def Net(embedding_features: int = features, **kwargs) -> nn.Module:
         msg = f"TextConditioningPlugin requires embedding_features={features}"
         assert embedding_features == features, msg
@@ -625,165 +623,3 @@ def TextConditioningPlugin(
         return Module([embedder, net], forward)  # type: ignore
 
     return Net
-
-def MultiCCVariableConditioningPlugin(
-    net_t: Type[nn.Module],
-    cc_embedding_features: int,
-    cat_dims: List[int],
-    cat_idxs: List[int],
-    cat_emb_dims: List[int],
-    group_matrix: torch.Tensor,
-) -> Callable[..., nn.Module]:
-    """Adds text conditioning without an embedder"""
-    embedder = EmbeddingGenerator(cc_embedding_features, cat_dims, cat_idxs, cat_emb_dims, group_matrix)
-
-    def Net( **kwargs) -> nn.Module:
-        net = net_t(cc_embedding_features=cc_embedding_features, **kwargs)  # type: ignore
-
-        def forward(
-            x: Tensor,
-            cc_embedding: Optional[Tensor] = None,
-            **kwargs,   
-        ):
-            if exists(cc_embedding):
-                return net(x, embedding=embedder(cc_embedding), **kwargs)
-            else:
-                return net(x, **kwargs)
-
-        return Module([net], forward)
-
-    return Net
-
-def ClassifierFreeGuidancePluginCCVariables(
-    net_t: Type[nn.Module],
-    num_conditioning_values: int,
-) -> Callable[..., nn.Module]:
-    """Classifier-Free Guidance with Variable Conditioning Values and Scaling Factors"""
-
-    def Net(embedding_features: int, **kwargs) -> nn.Module:
-        fixed_embedding = FixedEmbedding(
-            max_length=num_conditioning_values,
-            features=embedding_features,
-        )
-        net = net_t(embedding_features=embedding_features, **kwargs)  # type: ignore
-
-        def forward(
-            x: Tensor,
-            embedding: Optional[Tensor] = None,
-            embedding_scale: float = 1.0,
-            embedding_mask_proba: float = 0.0,
-            **kwargs,
-        ):
-            msg = "ClassiferFreeGuidancePlugin requires embedding"
-            assert exists(embedding), msg
-            b, device = embedding.shape[0], embedding.device
-            embedding_mask = fixed_embedding(embedding)
-
-            if embedding_mask_proba > 0.0:
-                # Randomly mask embedding
-                batch_mask = rand_bool(
-                    shape=(b, 1, 1), proba=embedding_mask_proba, device=device
-                )
-                embedding = torch.where(batch_mask, embedding_mask, embedding)
-
-            if embedding_scale != 1.0:
-                # Compute both normal and fixed embedding outputs
-                out = net(x, embedding=embedding, **kwargs)
-                out_masked = net(x, embedding=embedding_mask, **kwargs)
-                # Scale conditional output using classifier-free guidance
-                return out_masked + (out - out_masked) * embedding_scale
-            else:
-                return net(x, embedding=embedding, **kwargs)
-
-        return Module([fixed_embedding, net], forward)
-
-    return Net
-
-#this is the embedding function for tabular data from tabnet https://github.com/dreamquark-ai/tabnet/blob/2c0c4ebd2bb1cb639ea94ab4b11823bc49265588/pytorch_tabnet/tab_network.py#L809
-class EmbeddingGenerator(torch.nn.Module):
-    """
-    Classical embeddings generator
-    """
-
-    def __init__(self, input_dim, cat_dims, cat_idxs, cat_emb_dims, group_matrix):
-        """This is an embedding module for an entire set of features
-
-        Parameters
-        ----------
-        input_dim : int
-            Number of features coming as input (number of columns)
-        cat_dims : list of int
-            Number of modalities for each categorial features
-            If the list is empty, no embeddings will be done
-        cat_idxs : list of int
-            Positional index for each categorical features in inputs
-        cat_emb_dim : list of int
-            Embedding dimension for each categorical features
-            If int, the same embedding dimension will be used for all categorical features
-        group_matrix : torch matrix
-            Original group matrix before embeddings
-        """
-        super(EmbeddingGenerator, self).__init__()
-
-        if cat_dims == [] and cat_idxs == []:
-            self.skip_embedding = True
-            self.post_embed_dim = input_dim
-            self.embedding_group_matrix = group_matrix.to(group_matrix.device)
-            return
-        else:
-            self.skip_embedding = False
-
-        self.post_embed_dim = int(input_dim + np.sum(cat_emb_dims) - len(cat_emb_dims))
-
-        self.embeddings = torch.nn.ModuleList()
-
-        for cat_dim, emb_dim in zip(cat_dims, cat_emb_dims):
-            self.embeddings.append(torch.nn.Embedding(cat_dim, emb_dim))
-
-        # record continuous indices
-        self.continuous_idx = torch.ones(input_dim, dtype=torch.bool)
-        self.continuous_idx[cat_idxs] = 0
-
-        # update group matrix
-        n_groups = group_matrix.shape[0]
-        self.embedding_group_matrix = torch.empty((n_groups, self.post_embed_dim),
-                                                  device=group_matrix.device)
-        for group_idx in range(n_groups):
-            post_emb_idx = 0
-            cat_feat_counter = 0
-            for init_feat_idx in range(input_dim):
-                if self.continuous_idx[init_feat_idx] == 1:
-                    # this means that no embedding is applied to this column
-                    self.embedding_group_matrix[group_idx, post_emb_idx] = group_matrix[group_idx, init_feat_idx]  # noqa
-                    post_emb_idx += 1
-                else:
-                    # this is a categorical feature which creates multiple embeddings
-                    n_embeddings = cat_emb_dims[cat_feat_counter]
-                    self.embedding_group_matrix[group_idx, post_emb_idx:post_emb_idx+n_embeddings] = group_matrix[group_idx, init_feat_idx] / n_embeddings  # noqa
-                    post_emb_idx += n_embeddings
-                    cat_feat_counter += 1
-
-    def forward(self, x):
-        """
-        Apply embeddings to inputs
-        Inputs should be (batch_size, input_dim)
-        Outputs will be of size (batch_size, self.post_embed_dim)
-        """
-        if self.skip_embedding:
-            # no embeddings required
-            return x
-
-        cols = []
-        cat_feat_counter = 0
-        for feat_init_idx, is_continuous in enumerate(self.continuous_idx):
-            # Enumerate through continuous idx boolean mask to apply embeddings
-            if is_continuous:
-                cols.append(x[:, feat_init_idx].float().view(-1, 1))
-            else:
-                cols.append(
-                    self.embeddings[cat_feat_counter](x[:, feat_init_idx].long())
-                )
-                cat_feat_counter += 1
-        # concat
-        post_embeddings = torch.cat(cols, dim=1)
-        return post_embeddings
