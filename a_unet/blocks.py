@@ -624,7 +624,6 @@ def TextConditioningPlugin(
 
     return Net
 
-
 def TabularDataClassifierFreeGuidancePlugin(
     net_t: Type[nn.Module],
     embedding_max_length: int,
@@ -678,7 +677,7 @@ def TabularDataConditioningPlugin(
     cat_emb_dims: List[int],
     group_matrix: torch.Tensor,
 ) -> Callable[..., nn.Module]:
-    embedder = EmbeddingGenerator(cc_embedding_features, cat_dims, cat_idxs, cat_emb_dims, group_matrix)
+    embedder = TabularDataEmbeddingGenerator(cc_embedding_features, cat_dims, cat_idxs, cat_emb_dims, group_matrix)
     features: int = cc_embedding_features  # type: ignore
 
     def Net(embedding_features: int = features, **kwargs) -> nn.Module:
@@ -699,7 +698,7 @@ def TabularDataConditioningPlugin(
     return Net
 
 #this is the embedding function for tabular data from tabnet https://github.com/dreamquark-ai/tabnet/blob/2c0c4ebd2bb1cb639ea94ab4b11823bc49265588/pytorch_tabnet/tab_network.py#L809
-class EmbeddingGenerator(torch.nn.Module):
+class TabularDataEmbeddingGenerator(torch.nn.Module):
     """
     Classical embeddings generator
     """
@@ -722,7 +721,7 @@ class EmbeddingGenerator(torch.nn.Module):
         group_matrix : torch matrix
             Original group matrix before embeddings
         """
-        super(EmbeddingGenerator, self).__init__()
+        super(TabularDataEmbeddingGenerator, self).__init__()
 
         if cat_dims == [] and cat_idxs == []:
             self.skip_embedding = True
