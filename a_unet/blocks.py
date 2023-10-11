@@ -687,7 +687,7 @@ def TabularDataConditioningPlugin(
 
         def forward(
             x: Tensor, ccData: Sequence[float], embedding: Optional[Tensor] = None, **kwargs
-        ):
+        ):  
             cc_embedding = embedder(ccData)  # type: ignore
             if exists(embedding):
                 cc_embedding = torch.cat([cc_embedding, embedding], dim=1)
